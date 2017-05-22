@@ -2,6 +2,7 @@ import tensorflow as tf
 import numpy as np
 import gym
 from typing import Iterable
+from collections import deque
 
 
 def flag_parse():
@@ -15,7 +16,7 @@ def flag_parse():
 
     parser.add_argument("--n-hidden",
                         type=int,
-                        default=256,
+                        default=20,
                         help="Hiden unints for network")
 
     parser.add_argument("--entropy",
@@ -35,7 +36,7 @@ def flag_parse():
 
     parser.add_argument("--gradient_clip",
                         type=float,
-                        default=40,
+                        default=5,
                         help="Gradient Clip by Value (-value, value)")
     return parser.parse_args()
 
@@ -59,15 +60,18 @@ class Agent(object):
         action_onehot = tf.one_hot(self.actions, depth=output_dim, name="action_onehot")
         self.rewards = tf.placeholder(tf.float32, shape=[None], name="rewards")
         self.advantages = tf.placeholder(tf.float32, shape=[None], name="advantages")
+        net = self.states
 
-        net = tf.layers.dense(self.states,
-                              units=FLAGS.n_hidden,
-                              activation=tf.nn.relu,
-                              name="fc1")
-        net = tf.layers.dense(net,
-                              units=FLAGS.n_hidden,
-                              activation=tf.nn.relu,
-                              name="fc2")
+        with tf.variable_scope("layer1"):
+            net = tf.layers.dense(net,
+                                  units=FLAGS.n_hidden,
+                                  name="fc")
+            net = tf.nn.relu(net, name="relu")
+        with tf.variable_scope("layer2"):
+            net = tf.layers.dense(net,
+                                  units=FLAGS.n_hidden,
+                                  name="fc")
+            net = tf.nn.relu(net, name="relu")
 
         action_scores = tf.layers.dense(net, units=output_dim, name="action_scores")
         self.action_probs = tf.nn.softmax(action_scores, name="action_probs")
@@ -109,7 +113,7 @@ class Agent(object):
         states = np.reshape(states, (-1, self.input_dim))
 
         feed = {
-            self.states: states
+            self.states: states,
         }
 
         action_probs = sess.run(self.action_probs, feed)
@@ -134,7 +138,7 @@ class Agent(object):
         states = np.reshape(states, (-1, self.input_dim))
 
         feed = {
-            self.states: states
+            self.states: states,
         }
 
         values = sess.run(self.values, feed)
@@ -168,7 +172,7 @@ class Agent(object):
             self.states: states,
             self.actions: actions,
             self.rewards: rewards,
-            self.advantages: advantages
+            self.advantages: advantages,
         }
 
         sess = tf.get_default_session()
@@ -280,6 +284,7 @@ def main():
     input_dim, output_dim = get_env_info(env_id)
     n_envs = 32
     monitor_dir = "monitor"
+    logdir = "logdir"
 
     try:
         agent = Agent(input_dim, output_dim)
@@ -289,13 +294,29 @@ def main():
 
         with tf.Session() as sess:
             init = tf.global_variables_initializer()
-
+            summary_writers = [tf.summary.FileWriter("{}/{}".format(logdir, id)) for id in range(n_envs)]
             sess.run(init)
 
             i = 0
+
+            is_solved = deque(maxlen=100)
             while True:
                 env_rewards = train_episodes(envs, agent, 5)
                 print(i + 1, np.mean(env_rewards), env_rewards)
+
+                for id, reward in enumerate(env_rewards):
+                    summary = tf.Summary()
+                    summary.value.add(tag="episode_reward",
+                                      simple_value=reward)
+                    summary_writers[id].add_summary(summary, global_step=i + 1)
+                    summary_writers[id].flush()
+
+                is_solved.append(env_rewards[0])
+                if len(is_solved) == is_solved.maxlen:
+                    check = np.mean(is_solved)
+
+                    if check > 195:
+                        break
 
                 i += 1
     finally:
