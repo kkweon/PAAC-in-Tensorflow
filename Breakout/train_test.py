@@ -22,16 +22,22 @@ def test_gym_can_make_breakout():
     assert env.observation_space.shape == (210, 160, 3)
 
 
-def test_run():
+def run_pipeline():
     env = gym.make("Breakout-v0")
     s = env.reset()
-    for _ in range(10):
+
+    for _ in range(100):
         # 0 - nothing
         # 1 - fire
         # 2 - right
         # 3 - left
-        s, r, done, info = env.step(env.action_space.sample())
+        # s, r, done, info = env.step(env.action_space.sample())
+        s, r, done, info = env.step(3)
         # info = {'ale.lives': 5}
+
+        plot_image(train.pipeline(s, new_HW=(80, 80)))
+        plt.title("R: {}, Done: {}, Info: {}".format(r, done, info))
+        plt.show()
         if r != 0:
             print(r, done, info)
 
@@ -57,7 +63,11 @@ def test_discount_rewards():
     rewards = [-1, 0, 0, -1, 1]
     gamma = .99
 
-    expect = [-1, 0, 0, -1 + gamma, 1]
+    expect = [-1,
+              -1 * gamma ** 2,
+              gamma * -1,
+              -1,
+              1]
     output = train.discount_rewards(rewards, gamma)
 
     np.testing.assert_almost_equal(expect, output)
@@ -79,7 +89,7 @@ def test_discount_rewards():
 def test_multi_discount_rewards():
     gamma = .99
     r1 = [-1, 0, 0, -1, 1]
-    e1 = [-1, 0, 0, -1 + gamma, 1]
+    e1 = [-1, -1 * gamma ** 2, gamma * -1, -1, 1]
 
     r2 = [-1, -2, -3]
     e2 = [-1, -2, -3]
@@ -238,4 +248,4 @@ class AgentTest(tf.test.TestCase):
 
 
 if __name__ == '__main__':
-    test_run()
+    run_pipeline()

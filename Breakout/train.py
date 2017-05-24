@@ -9,12 +9,13 @@ import numpy as np
 import gym
 from scipy.misc import imresize
 from functools import partial
+from typing import Iterable
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--epsilon",
                     type=float,
-                    default=1e-8,
+                    default=1e-7,
                     help="Epsilon value for numeric stability")
 
 parser.add_argument("--decay",
@@ -46,6 +47,16 @@ parser.add_argument("--n-envs",
                     type=int,
                     default=16,
                     help="Number of parallel environments")
+
+parser.add_argument("--logdir",
+                    type=str,
+                    default="logdir",
+                    help="Log directory")
+
+parser.add_argument("--env",
+                    type=str,
+                    default="Breakout-v0",
+                    help="Environment Name")
 
 FLAGS, _ = parser.parse_known_args()
 
@@ -92,7 +103,7 @@ def binarize_image(image):
     G = image[..., 1]
     B = image[..., 2]
 
-    cond = (R > 0) & (G > 0) & (B > 0)
+    cond = (R > 0) | (G > 0) | (B > 0)
 
     binarized = np.zeros_like(R)
     binarized[cond] = 1
@@ -187,22 +198,29 @@ class Agent(object):
         self.action_probs = tf.nn.softmax(action_scores, name="action_probs")
 
         single_action_prob = tf.reduce_sum(self.action_probs * action_onehots, axis=1)
-        action_loss = tf.log(single_action_prob + FLAGS.epsilon) * self.advantages
+        log_action_prob = tf.log(single_action_prob + FLAGS.epsilon) * self.advantages
         entropy = - tf.reduce_sum(self.action_probs * tf.log(self.action_probs + FLAGS.epsilon), axis=1)
-        action_loss = - tf.reduce_mean(action_loss + entropy * FLAGS.entropy)
+        action_loss = - tf.reduce_sum(log_action_prob + entropy * FLAGS.entropy)
 
         self.values = tf.squeeze(tf.layers.dense(net, units=1, name="values"))
-        value_loss = tf.losses.mean_squared_error(self.rewards, self.values)
+        value_loss = tf.reduce_sum(tf.squared_difference(self.rewards, self.values))
 
-        self.loss = action_loss + value_loss
+        self.loss = action_loss + value_loss * 0.5
 
         self.optim = tf.train.RMSPropOptimizer(learning_rate=FLAGS.learning_rate,
                                                decay=FLAGS.decay)
 
         gradients = self.optim.compute_gradients(self.loss)
-        gradients = [(tf.clip_by_average_norm(grad, FLAGS.norm), var) for grad, var in gradients]
+        gradients = [(tf.clip_by_norm(grad, FLAGS.norm), var) for grad, var in gradients]
         global_step = tf.train.get_or_create_global_step()
-        self.train_op = self.optim.apply_gradients(gradients, global_step)
+        self.train_op = self.optim.apply_gradients(gradients, global_step=global_step)
+
+        tf.summary.histogram("Action Probs", self.action_probs)
+        tf.summary.histogram("Entropy", entropy)
+        tf.summary.scalar("Loss", self.loss)
+
+        self.summary_op = tf.summary.merge_all()
+        self.summary_writer = tf.summary.FileWriter("{}/main".format(FLAGS.logdir), graph=tf.get_default_graph())
 
     def get_actions(self, states):
         """
@@ -219,7 +237,7 @@ class Agent(object):
         action_probs = sess.run(self.action_probs, feed)
         noises = np.random.uniform(size=action_probs.shape[0]).reshape(-1, 1)
 
-        return (np.cumsum(action_probs) > noises).argmax(axis=1)
+        return (np.cumsum(action_probs, axis=1) > noises).argmax(axis=1)
 
     def get_values(self, states):
         """
@@ -262,14 +280,17 @@ class Agent(object):
         feed = {
             self.states: states,
             self.actions: actions,
-            self.values: values,
             self.rewards: rewards,
             self.advantages: advantages
         }
-        sess.run(self.train_op, feed)
+        _, summary_op, global_step = sess.run([self.train_op,
+                                               self.summary_op,
+                                               tf.train.get_global_step()],
+                                              feed_dict=feed)
+        self.summary_writer.add_summary(summary_op, global_step=global_step)
 
 
-def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline_fn=pipeline):
+def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipeline_fn=pipeline):
     n_envs = len(envs)
     all_dones = False
 
@@ -278,10 +299,17 @@ def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline_fn=pipeline):
     rewards_memory = [[] for _ in range(n_envs)]
     values_memory = [[] for _ in range(n_envs)]
 
-    observations = [pipeline_fn(env.reset()) for env in envs]
+    old_observations = [0 for env in envs]
     is_env_done = [False for _ in range(n_envs)]
     lives_info = [5 for _ in range(n_envs)]
     episode_rewards = [0 for _ in range(n_envs)]
+
+    observations = []
+
+    for id, env in enumerate(envs):
+        old_s = env.reset()
+        s = env.step(1)[0]
+        observations.append(pipeline_fn(s) - pipeline_fn(old_s))
 
     while not all_dones:
 
@@ -298,11 +326,9 @@ def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline_fn=pipeline):
 
                     episode_rewards[id] += r
 
-                    assert type(r) == float
-
-                    if info['ale.lives'] < lives_info[id]:
+                    if FLAGS.env == "Breakout-v0" and info['ale.lives'] < lives_info[id]:
                         r = -1.0
-                        lives_info[id] -= 1
+                        lives_info[id] = info['ale.lives']
 
                     s2 = pipeline_fn(s2)
 
@@ -311,7 +337,8 @@ def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline_fn=pipeline):
                     rewards_memory[id].append(r)
                     values_memory[id].append(values[id])
 
-                    observations[id] = s2
+                    observations[id] = s2 - old_observations[id]
+                    old_observations[id] = s2
 
         future_values = agent.get_values(observations)
 
@@ -332,19 +359,18 @@ def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline_fn=pipeline):
 
 
 def main():
-    GAME_ID = "Breakout-v0"
     input_shape = [80, 80, 1]
     output_dim = 4
     pipeline_fn = partial(pipeline, new_HW=input_shape[:-1])
 
-    envs = [gym.make(GAME_ID) for i in range(FLAGS.n_envs)]
+    envs = [gym.make(FLAGS.env) for i in range(FLAGS.n_envs)]
     envs[0] = gym.wrappers.Monitor(envs[0], "monitors", force=True)
 
-    summary_writers = [tf.summary.FileWriter(logdir="logdir/env-{}".format(i)) for i in range(FLAGS.n_envs)]
+    summary_writers = [tf.summary.FileWriter(logdir="{}/env-{}".format(FLAGS.logdir, i)) for i in range(FLAGS.n_envs)]
     agent = Agent(input_shape, output_dim)
 
     saver = tf.train.Saver()
-    latest_checkpoint = tf.train.latest_checkpoint("logdir/")
+    latest_checkpoint = tf.train.latest_checkpoint(FLAGS.logdir)
 
     with tf.Session() as sess:
         try:
@@ -358,8 +384,10 @@ def main():
 
             episode = 1
             while True:
-                rewards = run_episodes(envs, agent, pipeline=pipeline_fn)
+                rewards = run_episodes(envs, agent, pipeline_fn=pipeline_fn)
+                print(episode, np.mean(rewards))
                 print(rewards)
+                print()
 
                 for id, r in enumerate(rewards):
                     summary = tf.Summary()
@@ -368,14 +396,14 @@ def main():
                     summary_writers[id].flush()
 
                 if episode % 10 == 0:
-                    saver.save(sess, "logdir/model.ckpt", write_meta_graph=False)
-                    print("Saved to logdir/model.ckpt")
+                    saver.save(sess, "{}/model.ckpt".format(FLAGS.logdir), write_meta_graph=False)
+                    print("Saved to {}/model.ckpt".format(FLAGS.logdir))
 
                 episode += 1
 
         finally:
-            saver.save(sess, "logdir/model.ckpt", write_meta_graph=False)
-            print("Saved to logdir/model.ckpt")
+            saver.save(sess, "{}/model.ckpt".format(FLAGS.logdir), write_meta_graph=False)
+            print("Saved to {}/model.ckpt".format(FLAGS.logdir))
 
             for env in envs:
                 env.close()
