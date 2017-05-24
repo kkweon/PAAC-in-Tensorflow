@@ -138,6 +138,18 @@ def discount_rewards(rewards, gamma=FLAGS.decay):
     return discounted
 
 
+def PRelu(net, name):
+    with tf.variable_scope(name):
+        alpha = tf.get_variable("alpha",
+                                shape=net.get_shape()[-1],
+                                initializer=tf.zeros_initializer(),
+                                dtype=tf.float32)
+        pos = tf.nn.relu(net, name="relu")
+        neg = alpha * (net - tf.abs(net)) * 0.5
+
+    return pos + neg
+
+
 def discount_multi_rewards(multi_rewards, gamma=FLAGS.decay):
     """
     Args:
@@ -182,17 +194,17 @@ class Agent(object):
         net = self.states
         with tf.variable_scope("layer1"):
             net = tf.layers.conv2d(net, filters=16, kernel_size=(8, 8), strides=(4, 4), name="conv")
-            net = tf.nn.relu(net, name="relu")
+            net = PRelu(net, name="relu")
 
         with tf.variable_scope("layer2"):
             net = tf.layers.conv2d(net, filters=32, kernel_size=(4, 4), strides=(2, 2), name="conv")
-            net = tf.nn.relu(net, name="relu")
+            net = PRelu(net, name="relu")
 
         net = tf.contrib.layers.flatten(net)
 
         with tf.variable_scope("fc1"):
             net = tf.layers.dense(net, units=256, name="fc")
-            net = tf.nn.relu(net, name="relu")
+            net = PRelu(net, name="relu")
 
         action_scores = tf.layers.dense(net, units=output_dim, name="action_scores")
         self.action_probs = tf.nn.softmax(action_scores, name="action_probs")
@@ -308,8 +320,12 @@ def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipel
 
     for id, env in enumerate(envs):
         old_s = env.reset()
+        old_s = pipeline_fn(old_s)
         s = env.step(1)[0]
-        observations.append(pipeline_fn(s) - pipeline_fn(old_s))
+        s = pipeline_fn(s)
+
+        observations.append(s - old_s)
+        old_observations[id] = s
 
     while not all_dones:
 
@@ -326,7 +342,7 @@ def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipel
 
                     episode_rewards[id] += r
 
-                    if FLAGS.env == "Breakout-v0" and info['ale.lives'] < lives_info[id]:
+                    if FLAGS.env == "Breakout-v0" and info['ale.lives'] < lives_info[id] or info['ale.lives'] == 0 and is_env_done[id]:
                         r = -1.0
                         lives_info[id] = info['ale.lives']
 
