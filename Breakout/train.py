@@ -34,12 +34,12 @@ parser.add_argument("--norm",
 
 parser.add_argument("--entropy",
                     type=float,
-                    default=0.05,
+                    default=0.01,
                     help="Entropy coefficient")
 
 parser.add_argument("--t-max",
                     type=int,
-                    default=10,
+                    default=5,
                     help="Update period")
 
 parser.add_argument("--n-envs",
@@ -60,7 +60,7 @@ def resize_image(image, new_HW=(40, 40)):
     Returns:
         3-D Array: A resized image of shape (`height`, `width`, C)
     """
-    return imresize(image, new_HW)
+    return imresize(image, new_HW, interp='nearest')
 
 
 def crop_ROI(image, height_range=(35, 210), width_range=(8, 150)):
@@ -187,13 +187,12 @@ class Agent(object):
         self.action_probs = tf.nn.softmax(action_scores, name="action_probs")
 
         single_action_prob = tf.reduce_sum(self.action_probs * action_onehots, axis=1)
-        action_loss = - tf.log(single_action_prob + FLAGS.epsilon) * self.advantages
+        action_loss = tf.log(single_action_prob + FLAGS.epsilon) * self.advantages
         entropy = - tf.reduce_sum(self.action_probs * tf.log(self.action_probs + FLAGS.epsilon), axis=1)
-        action_loss = tf.reduce_mean(action_loss - entropy * FLAGS.entropy)
+        action_loss = - tf.reduce_mean(action_loss + entropy * FLAGS.entropy)
 
         self.values = tf.squeeze(tf.layers.dense(net, units=1, name="values"))
-
-        value_loss = tf.reduce_mean(tf.squared_difference(self.values, self.rewards))
+        value_loss = tf.losses.mean_squared_error(self.rewards, self.values)
 
         self.loss = action_loss + value_loss
 
@@ -252,6 +251,8 @@ class Agent(object):
 
         rewards = discount_multi_rewards(rewards, FLAGS.decay)
         rewards = np.hstack(rewards)
+        rewards -= np.mean(rewards)
+        rewards /= np.std(rewards) + FLAGS.epsilon
 
         advantages = rewards - values
         advantages -= np.mean(advantages)
@@ -268,7 +269,7 @@ class Agent(object):
         sess.run(self.train_op, feed)
 
 
-def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline=pipeline):
+def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline_fn=pipeline):
     n_envs = len(envs)
     all_dones = False
 
@@ -277,7 +278,7 @@ def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline=pipeline):
     rewards_memory = [[] for _ in range(n_envs)]
     values_memory = [[] for _ in range(n_envs)]
 
-    observations = [pipeline(env.reset()) for env in envs]
+    observations = [pipeline_fn(env.reset()) for env in envs]
     is_env_done = [False for _ in range(n_envs)]
     lives_info = [5 for _ in range(n_envs)]
     episode_rewards = [0 for _ in range(n_envs)]
@@ -303,7 +304,7 @@ def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline=pipeline):
                         r = -1.0
                         lives_info[id] -= 1
 
-                    s2 = pipeline(s2)
+                    s2 = pipeline_fn(s2)
 
                     states_memory[id].append(observations[id])
                     actions_memory[id].append(actions[id])
@@ -315,7 +316,7 @@ def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline=pipeline):
         future_values = agent.get_values(observations)
 
         for id in range(n_envs):
-            if not is_env_done[id]:
+            if not is_env_done[id] and rewards_memory[id][-1] != -1:
                 rewards_memory[id][-1] += FLAGS.decay * future_values[id]
 
         agent.train(states_memory, actions_memory, rewards_memory, values_memory)
@@ -332,26 +333,29 @@ def run_episodes(envs, agent: Agent, t_max=FLAGS.t_max, pipeline=pipeline):
 
 def main():
     GAME_ID = "Breakout-v0"
-    input_shape = [40, 40, 1]
+    input_shape = [80, 80, 1]
     output_dim = 4
     pipeline_fn = partial(pipeline, new_HW=input_shape[:-1])
 
-    try:
-        envs = [gym.make(GAME_ID) for i in range(FLAGS.n_envs)]
-        envs[0] = gym.wrappers.Monitor(envs[0], "monitors", force=True)
+    envs = [gym.make(GAME_ID) for i in range(FLAGS.n_envs)]
+    envs[0] = gym.wrappers.Monitor(envs[0], "monitors", force=True)
 
-        summary_writers = [tf.summary.FileWriter(logdir="logdir/env-{}".format(i)) for i in range(FLAGS.n_envs)]
-        agent = Agent(input_shape, output_dim)
+    summary_writers = [tf.summary.FileWriter(logdir="logdir/env-{}".format(i)) for i in range(FLAGS.n_envs)]
+    agent = Agent(input_shape, output_dim)
 
-        saver = tf.train.Saver()
-        latest_checkpoint = tf.train.latest_checkpoint("logdir/")
+    saver = tf.train.Saver()
+    latest_checkpoint = tf.train.latest_checkpoint("logdir/")
 
-        with tf.Session() as sess:
+    with tf.Session() as sess:
+        try:
             if latest_checkpoint is not None:
                 saver.restore(sess, latest_checkpoint)
+                print("Restored from {}".format(latest_checkpoint))
             else:
                 init = tf.global_variables_initializer()
                 sess.run(init)
+                print("Initialized weights")
+
             episode = 1
             while True:
                 rewards = run_episodes(envs, agent, pipeline=pipeline_fn)
@@ -365,15 +369,19 @@ def main():
 
                 if episode % 10 == 0:
                     saver.save(sess, "logdir/model.ckpt", write_meta_graph=False)
+                    print("Saved to logdir/model.ckpt")
 
                 episode += 1
 
-    finally:
-        for env in envs:
-            env.close()
+        finally:
+            saver.save(sess, "logdir/model.ckpt", write_meta_graph=False)
+            print("Saved to logdir/model.ckpt")
 
-        for writer in summary_writers:
-            writer.close()
+            for env in envs:
+                env.close()
+
+            for writer in summary_writers:
+                writer.close()
 
 
 if __name__ == '__main__':
