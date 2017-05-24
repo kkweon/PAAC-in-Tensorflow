@@ -1,6 +1,7 @@
 ###Python###
 monitor
 logdir
+monitors
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
