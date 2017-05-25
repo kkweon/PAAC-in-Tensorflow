@@ -25,14 +25,14 @@ def test_gym_can_make_breakout():
 def run_pipeline():
     env = gym.make("Breakout-v0")
     s = env.reset()
+    env.step(1)
 
     for _ in range(100):
         # 0 - nothing
         # 1 - fire
         # 2 - right
         # 3 - left
-        # s, r, done, info = env.step(env.action_space.sample())
-        s, r, done, info = env.step(3)
+        s, r, done, info = env.step(env.action_space.sample())
         # info = {'ale.lives': 5}
 
         plot_image(train.pipeline(s, new_HW=(80, 80)))

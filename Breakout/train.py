@@ -61,7 +61,7 @@ parser.add_argument("--env",
 FLAGS, _ = parser.parse_known_args()
 
 
-def resize_image(image, new_HW=(40, 40)):
+def resize_image(image, new_HW):
     """Returns a resize image
 
     Args:
@@ -111,14 +111,15 @@ def binarize_image(image):
     return binarized
 
 
-def pipeline(image, new_HW=(40, 40)):
+def pipeline(image, new_HW):
     """Image process pipeline
 
     Args:
         image (3-D Array): 3-D array of shape (H, W, C)
+        new_HW (tuple): New height and width int tuple of (height, width)
 
     Returns:
-        3-D Array: Binarized image of shape (H, W, 1)
+        3-D Array: Binarized image of shape (height, width, 1)
     """
     image = crop_ROI(image)
     image = resize_image(image, new_HW=new_HW)
@@ -138,18 +139,6 @@ def discount_rewards(rewards, gamma=FLAGS.decay):
     return discounted
 
 
-def PRelu(net, name):
-    with tf.variable_scope(name):
-        alpha = tf.get_variable("alpha",
-                                shape=net.get_shape()[-1],
-                                initializer=tf.zeros_initializer(),
-                                dtype=tf.float32)
-        pos = tf.nn.relu(net, name="relu")
-        neg = alpha * (net - tf.abs(net)) * 0.5
-
-    return pos + neg
-
-
 def discount_multi_rewards(multi_rewards, gamma=FLAGS.decay):
     """
     Args:
@@ -167,7 +156,7 @@ def discount_multi_rewards(multi_rewards, gamma=FLAGS.decay):
 
 
 class Agent(object):
-    def __init__(self, input_shape, output_dim):
+    def __init__(self, input_shape: list, output_dim: int):
         """Summary
 
         Args:
@@ -178,7 +167,7 @@ class Agent(object):
         self.output_dim = output_dim
         self.__build_network(self.input_shape, self.output_dim)
 
-    def __build_network(self, input_shape, output_dim):
+    def __build_network(self, input_shape: list, output_dim: int):
         """Summary
 
         Args:
@@ -194,38 +183,47 @@ class Agent(object):
         net = self.states
         with tf.variable_scope("layer1"):
             net = tf.layers.conv2d(net, filters=16, kernel_size=(8, 8), strides=(4, 4), name="conv")
-            net = PRelu(net, name="relu")
+            net = tf.nn.relu(net, name="relu")
 
         with tf.variable_scope("layer2"):
             net = tf.layers.conv2d(net, filters=32, kernel_size=(4, 4), strides=(2, 2), name="conv")
-            net = PRelu(net, name="relu")
+            net = tf.nn.relu(net, name="relu")
+
+        with tf.variable_scope("layer3"):
+            net = tf.layers.conv2d(net, filters=64, kernel_size=(4, 4), strides=(2, 2), name="conv")
+            net = tf.nn.relu(net, name="relu")
 
         net = tf.contrib.layers.flatten(net)
 
         with tf.variable_scope("fc1"):
             net = tf.layers.dense(net, units=256, name="fc")
-            net = PRelu(net, name="relu")
+            net = tf.nn.relu(net, name="relu")
 
-        action_scores = tf.layers.dense(net, units=output_dim, name="action_scores")
-        self.action_probs = tf.nn.softmax(action_scores, name="action_probs")
+        with tf.variable_scope("action_network"):
+            action_scores = tf.layers.dense(net, units=output_dim, name="action_scores")
+            self.action_probs = tf.nn.softmax(action_scores, name="action_probs")
+            single_action_prob = tf.reduce_sum(self.action_probs * action_onehots, axis=1)
+            log_action_prob = - tf.log(single_action_prob + FLAGS.epsilon) * self.advantages
+            action_loss = tf.reduce_sum(log_action_prob)
 
-        single_action_prob = tf.reduce_sum(self.action_probs * action_onehots, axis=1)
-        log_action_prob = tf.log(single_action_prob + FLAGS.epsilon) * self.advantages
-        entropy = - tf.reduce_sum(self.action_probs * tf.log(self.action_probs + FLAGS.epsilon), axis=1)
-        action_loss = - tf.reduce_sum(log_action_prob + entropy * FLAGS.entropy)
+        with tf.variable_scope("entropy"):
+            entropy = - tf.reduce_sum(self.action_probs * tf.log(self.action_probs + FLAGS.epsilon), axis=1)
+            entropy_sum = tf.reduce_sum(entropy)
 
-        self.values = tf.squeeze(tf.layers.dense(net, units=1, name="values"))
-        value_loss = tf.reduce_sum(tf.squared_difference(self.rewards, self.values))
+        with tf.variable_scope("value_network"):
+            self.values = tf.squeeze(tf.layers.dense(net, units=1, name="values"))
+            value_loss = tf.reduce_sum(tf.squared_difference(self.rewards, self.values))
 
-        self.loss = action_loss + value_loss * 0.5
+        with tf.variable_scope("total_loss"):
+            self.loss = action_loss + value_loss * 0.5 - entropy_sum * FLAGS.entropy
 
-        self.optim = tf.train.RMSPropOptimizer(learning_rate=FLAGS.learning_rate,
-                                               decay=FLAGS.decay)
-
-        gradients = self.optim.compute_gradients(self.loss)
-        gradients = [(tf.clip_by_norm(grad, FLAGS.norm), var) for grad, var in gradients]
-        global_step = tf.train.get_or_create_global_step()
-        self.train_op = self.optim.apply_gradients(gradients, global_step=global_step)
+        with tf.variable_scope("train_op"):
+            self.optim = tf.train.RMSPropOptimizer(learning_rate=FLAGS.learning_rate,
+                                                   decay=FLAGS.decay)
+            gradients = self.optim.compute_gradients(loss=self.loss)
+            gradients = [(tf.clip_by_norm(grad, FLAGS.norm), var) for grad, var in gradients]
+            self.train_op = self.optim.apply_gradients(gradients,
+                                                       global_step=tf.train.get_or_create_global_step())
 
         tf.summary.histogram("Action Probs", self.action_probs)
         tf.summary.histogram("Entropy", entropy)
@@ -311,21 +309,25 @@ def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipel
     rewards_memory = [[] for _ in range(n_envs)]
     values_memory = [[] for _ in range(n_envs)]
 
-    old_observations = [0 for env in envs]
     is_env_done = [False for _ in range(n_envs)]
-    lives_info = [5 for _ in range(n_envs)]
     episode_rewards = [0 for _ in range(n_envs)]
 
     observations = []
+    old_observations = []
+    lives_info = []
 
     for id, env in enumerate(envs):
         old_s = env.reset()
         old_s = pipeline_fn(old_s)
-        s = env.step(1)[0]
+        s, _, _, info = env.step(1)
         s = pipeline_fn(s)
 
         observations.append(s - old_s)
-        old_observations[id] = s
+
+        if "Breakout" in FLAGS.env:
+            lives_info.append(info['ale.lives'])
+
+        old_observations.append(s)
 
     while not all_dones:
 
@@ -341,12 +343,11 @@ def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipel
                     s2, r, is_env_done[id], info = env.step(actions[id])
 
                     episode_rewards[id] += r
+                    s2 = pipeline_fn(s2)
 
-                    if FLAGS.env == "Breakout-v0" and info['ale.lives'] < lives_info[id] or info['ale.lives'] == 0 and is_env_done[id]:
+                    if "Breakout" in FLAGS.env and info['ale.lives'] < lives_info[id]:
                         r = -1.0
                         lives_info[id] = info['ale.lives']
-
-                    s2 = pipeline_fn(s2)
 
                     states_memory[id].append(observations[id])
                     actions_memory[id].append(actions[id])

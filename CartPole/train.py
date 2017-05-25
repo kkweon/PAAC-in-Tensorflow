@@ -36,7 +36,7 @@ def flag_parse():
 
     parser.add_argument("--gradient_clip",
                         type=float,
-                        default=5,
+                        default=40,
                         help="Gradient Clip by Value (-value, value)")
     return parser.parse_args()
 
@@ -73,29 +73,31 @@ class Agent(object):
                                   name="fc")
             net = tf.nn.relu(net, name="relu")
 
-        action_scores = tf.layers.dense(net, units=output_dim, name="action_scores")
-        self.action_probs = tf.nn.softmax(action_scores, name="action_probs")
+        with tf.variable_scope("action_network"):
+            action_scores = tf.layers.dense(net, units=output_dim, name="action_scores")
+            self.action_probs = tf.nn.softmax(action_scores, name="action_probs")
 
-        single_action_prob = tf.reduce_sum(self.action_probs * action_onehot, axis=1)
-        log_action_prob = tf.log(single_action_prob + FLAGS.epsilon)
+            single_action_prob = tf.reduce_sum(self.action_probs * action_onehot, axis=1)
+            log_action_prob = - tf.log(single_action_prob + FLAGS.epsilon)
+            self.actor_loss = tf.reduce_sum(log_action_prob * self.advantages)
 
-        entropy = - tf.reduce_sum(self.action_probs * tf.log(self.action_probs + FLAGS.epsilon), axis=1)
+        with tf.variable_scope("entropy"):
+            entropy = - tf.reduce_sum(self.action_probs * tf.log(self.action_probs + FLAGS.epsilon))
 
-        self.actor_loss = - tf.reduce_mean(log_action_prob * self.advantages + entropy * FLAGS.entropy)
+        with tf.variable_scope("value_network"):
+            self.values = tf.squeeze(tf.layers.dense(net, units=1, name="values"))
+            self.value_loss = tf.reduce_sum(tf.squared_difference(self.values, self.rewards))
 
-        self.values = tf.squeeze(tf.layers.dense(net, units=1, name="values"))
-        self.value_loss = tf.reduce_mean(tf.squared_difference(self.values, self.rewards))
+        with tf.variable_scope("total_loss"):
+            self.total_loss = self.actor_loss + self.value_loss - entropy * FLAGS.entropy
 
-        self.optim = tf.train.RMSPropOptimizer(learning_rate=FLAGS.learning_rate,
-                                               decay=FLAGS.decay)
-
-        self.total_loss = self.actor_loss + self.value_loss
-
-        self.global_step = tf.train.get_or_create_global_step()
-
-        gradients = self.optim.compute_gradients(self.total_loss)
-        gradients = [(tf.clip_by_value(grad, -FLAGS.gradient_clip, FLAGS.gradient_clip), var) for grad, var in gradients]
-        self.train_op = self.optim.apply_gradients(gradients, global_step=self.global_step)
+        with tf.variable_scope("train_op"):
+            self.optim = tf.train.RMSPropOptimizer(learning_rate=FLAGS.learning_rate,
+                                                   decay=FLAGS.decay)
+            gradients = self.optim.compute_gradients(self.total_loss)
+            gradients = [(tf.clip_by_norm(grad, FLAGS.gradient_clip), var) for grad, var in gradients]
+            self.train_op = self.optim.apply_gradients(gradients,
+                                                       global_step=tf.train.get_or_create_global_step())
 
     def get_actions(self, states):
         """Returns an action
@@ -282,7 +284,7 @@ def get_env_info(env_id: str):
 def main():
     env_id = "CartPole-v0"
     input_dim, output_dim = get_env_info(env_id)
-    n_envs = 32
+    n_envs = 16
     monitor_dir = "monitor"
     logdir = "logdir"
 
