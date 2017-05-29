@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+tmux kill-server
+LOGDIR="logdir"
+
+if [ -d $LOGDIR ]; then
+    read -n1 -p "Do you want to delete $LOGDIR [y/n]: " answer
+    echo ""
+
+    case $answer in
+        y|Y) rm -rf $LOGDIR; echo $LOGDIR has been deleted ;;
+        *) echo $LOGDIR has not been deleted;;
+    esac
+fi
+
+tmux new -s train -d
+tmux new -s tensorboard -d
+tmux send-keys -t train "python train.py" C-m
+tmux send-keys -t tensorboard "tensorboard --logdir $LOGDIR" C-m
+
+
+tmux ls
