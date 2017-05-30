@@ -6,10 +6,10 @@
 <img src="assets/cartpole.gif" width="320" />
 </td>
 <td>
-<img src="assets/pong.gif" width="320" />
+<img src="assets/pong.gif" width="320" height="350" />
 </td>
 <td>
-<img src="assets/breakout.gif" width="320" />
+<img src="assets/breakout.gif" width="320" height="350" />
 </td>
 </tr>
 <tr>
