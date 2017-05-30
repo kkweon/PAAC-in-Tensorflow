@@ -17,3 +17,6 @@ tmux new -s train -d
 tmux new -s tensorboard -d
 tmux send-keys -t train "python train.py" C-m
 tmux send-keys -t tensorboard "tensorboard --logdir $LOGDIR" C-m
+
+
+tmux ls

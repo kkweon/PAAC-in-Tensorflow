@@ -170,7 +170,7 @@ class AgentTest(tf.test.TestCase):
             sess.run(init)
 
             s = self.env.reset()
-            s = train.pipeline(s)
+            s = train.pipeline(s, self.input_shape[:-1])
 
             actions = self.agent.get_actions(s)
             assert np.shape(actions) == (1,)
@@ -188,7 +188,7 @@ class AgentTest(tf.test.TestCase):
             sess.run(init)
 
             s = self.env.reset()
-            s = train.pipeline(s)
+            s = train.pipeline(s, self.input_shape[:-1])
 
             values = self.agent.get_values(s)
             assert np.shape(values) == (1,)
@@ -214,7 +214,7 @@ class AgentTest(tf.test.TestCase):
             rewards_memory = [[] for _ in range(n_envs)]
             values_memory = [[] for _ in range(n_envs)]
 
-            observations = [train.pipeline(env.reset()) for env in envs_list]
+            observations = [train.pipeline(env.reset(), self.input_shape[:-1]) for env in envs_list]
             dones = [False for _ in range(n_envs)]
 
             actions = self.agent.get_actions(observations)
@@ -229,18 +229,20 @@ class AgentTest(tf.test.TestCase):
                 rewards_memory[id].append(r)
                 values_memory[id].append(values[id])
 
-                observations[id] = train.pipeline(s2)
+                observations[id] = train.pipeline(s2, self.input_shape[:-1])
             self.agent.train(states_memory, actions_memory, rewards_memory, values_memory)
 
     def test_can_run_full_episodes(self):
         n_envs = 3
         try:
+            agent = train.Agent(input_shape=[80, 80, 4], output_dim=4)
             envs = [gym.make("Breakout-v0") for _ in range(n_envs)]
+            pipeline_fn = lambda x: train.pipeline(x, [80, 80])
 
-            with self.test_session(graph=self.g) as sess:
+            with self.test_session() as sess:
                 init = tf.global_variables_initializer()
                 sess.run(init)
-                print(train.run_episodes(envs, self.agent))
+                print(train.run_episodes(envs, agent, pipeline_fn=pipeline_fn))
 
         finally:
             for env in envs:

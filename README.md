@@ -3,18 +3,24 @@
 <table align="center">
 <tr>
 <td>
-<img src="assets/cartpole.gif" />
+<img src="assets/cartpole.gif" width="320" />
 </td>
 <td>
-<img src="assets/pong.gif" />
+<img src="assets/pong.gif" width="320" />
+</td>
+<td>
+<img src="assets/breakout.gif" width="320" />
 </td>
 </tr>
 <tr>
     <td>
-        CartPole-v0
+        CartPole-v0 (Maxstep: 200)
     </td>
     <td>
         Pong-v0 (training for a few hours)
+    </td>
+    <td>
+        Breakout-v0 (training for a few hours)
     </td>
 
 </tr>

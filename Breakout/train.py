@@ -10,6 +10,7 @@ import gym
 from scipy.misc import imresize
 from functools import partial
 from typing import Iterable
+from skimage.color import rgb2gray
 
 
 parser = argparse.ArgumentParser()
@@ -21,12 +22,12 @@ parser.add_argument("--epsilon",
 parser.add_argument("--decay",
                     type=float,
                     default=.99,
-                    help="Decay rate for RMSProp and Discount Rate")
+                    help="Decay rate for AdamOptimizer and Discount Rate")
 
 parser.add_argument("--learning-rate",
                     type=float,
                     default=0.001,
-                    help="Learning rate for RMSProp")
+                    help="Learning rate for AdamOptimizer")
 
 parser.add_argument("--norm",
                     type=float,
@@ -40,7 +41,7 @@ parser.add_argument("--entropy",
 
 parser.add_argument("--t-max",
                     type=int,
-                    default=5,
+                    default=50,
                     help="Update period")
 
 parser.add_argument("--n-envs",
@@ -74,7 +75,7 @@ def resize_image(image, new_HW):
     return imresize(image, new_HW, interp='nearest')
 
 
-def crop_ROI(image, height_range=(35, 210), width_range=(8, 150)):
+def crop_ROI(image, height_range=(35, 210), width_range=(0, 160)):
     """Crops a region of interest (ROI)
 
     Args:
@@ -105,7 +106,7 @@ def binarize_image(image):
 
     cond = (R > 0) | (G > 0) | (B > 0)
 
-    binarized = np.zeros_like(R)
+    binarized = np.zeros_like(R, dtype=np.float32)
     binarized[cond] = 1
 
     return binarized
@@ -123,8 +124,12 @@ def pipeline(image, new_HW):
     """
     image = crop_ROI(image)
     image = resize_image(image, new_HW=new_HW)
+    # image = binarize_image(image)
+    image = rgb2gray(image)
 
-    return np.expand_dims(binarize_image(image), axis=2)
+    image = (image - np.mean(image)) / (np.std(image) + 1e-8)
+
+    return np.expand_dims(image, axis=2)
 
 
 def discount_rewards(rewards, gamma=FLAGS.decay):
@@ -181,16 +186,13 @@ class Agent(object):
         self.advantages = tf.placeholder(tf.float32, shape=[None], name="advantages")
 
         net = self.states
+
         with tf.variable_scope("layer1"):
             net = tf.layers.conv2d(net, filters=16, kernel_size=(8, 8), strides=(4, 4), name="conv")
             net = tf.nn.relu(net, name="relu")
 
         with tf.variable_scope("layer2"):
             net = tf.layers.conv2d(net, filters=32, kernel_size=(4, 4), strides=(2, 2), name="conv")
-            net = tf.nn.relu(net, name="relu")
-
-        with tf.variable_scope("layer3"):
-            net = tf.layers.conv2d(net, filters=64, kernel_size=(4, 4), strides=(2, 2), name="conv")
             net = tf.nn.relu(net, name="relu")
 
         net = tf.contrib.layers.flatten(net)
@@ -218,8 +220,7 @@ class Agent(object):
             self.loss = action_loss + value_loss * 0.5 - entropy_sum * FLAGS.entropy
 
         with tf.variable_scope("train_op"):
-            self.optim = tf.train.RMSPropOptimizer(learning_rate=FLAGS.learning_rate,
-                                                   decay=FLAGS.decay)
+            self.optim = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate)
             gradients = self.optim.compute_gradients(loss=self.loss)
             gradients = [(tf.clip_by_norm(grad, FLAGS.norm), var) for grad, var in gradients]
             self.train_op = self.optim.apply_gradients(gradients,
@@ -227,7 +228,14 @@ class Agent(object):
 
         tf.summary.histogram("Action Probs", self.action_probs)
         tf.summary.histogram("Entropy", entropy)
-        tf.summary.scalar("Loss", self.loss)
+        tf.summary.histogram("Actions", self.actions)
+        tf.summary.scalar("Loss/total", self.loss)
+        tf.summary.scalar("Loss/actor", action_loss)
+        tf.summary.scalar("Loss/value", value_loss)
+        tf.summary.image("Screen", tf.gather(self.states[:, :, :, -1:], tf.random_uniform(shape=[3, ],
+                                                                                          minval=0,
+                                                                                          maxval=tf.shape(self.states)[0],
+                                                                                          dtype=np.int32)))
 
         self.summary_op = tf.summary.merge_all()
         self.summary_writer = tf.summary.FileWriter("{}/main".format(FLAGS.logdir), graph=tf.get_default_graph())
@@ -245,7 +253,7 @@ class Agent(object):
             self.states: np.reshape(states, [-1, *self.input_shape])
         }
         action_probs = sess.run(self.action_probs, feed)
-        noises = np.random.uniform(size=action_probs.shape[0]).reshape(-1, 1)
+        noises = np.random.uniform(size=action_probs.shape[0])[:, np.newaxis]
 
         return (np.cumsum(action_probs, axis=1) > noises).argmax(axis=1)
 
@@ -262,6 +270,17 @@ class Agent(object):
             self.states: np.reshape(states, [-1, *self.input_shape])
         }
         return sess.run(self.values, feed).reshape(-1)
+
+    def get_actions_values(self, states):
+        sess = tf.get_default_session()
+        feed = {
+            self.states: states,
+        }
+
+        action_probs, values = sess.run([self.action_probs, self.values], feed)
+        noises = np.random.uniform(size=action_probs.shape[0])[:, np.newaxis]
+
+        return (np.cumsum(action_probs, axis=1) > noises).argmax(axis=1), values.flatten()
 
     def train(self, states, actions, rewards, values):
         """Update parameters by gradient descent
@@ -313,28 +332,22 @@ def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipel
     episode_rewards = [0 for _ in range(n_envs)]
 
     observations = []
-    old_observations = []
     lives_info = []
 
     for id, env in enumerate(envs):
-        old_s = env.reset()
-        old_s = pipeline_fn(old_s)
-        s, _, _, info = env.step(1)
+        env.reset()
+        s, r, done, info = env.step(1)
         s = pipeline_fn(s)
-
-        observations.append(s - old_s)
+        observations.append(s)
 
         if "Breakout" in FLAGS.env:
             lives_info.append(info['ale.lives'])
-
-        old_observations.append(s)
 
     while not all_dones:
 
         for t in range(t_max):
 
-            actions = agent.get_actions(observations)
-            values = agent.get_values(observations)
+            actions, values = agent.get_actions_values(observations)
 
             for id, env in enumerate(envs):
 
@@ -343,7 +356,6 @@ def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipel
                     s2, r, is_env_done[id], info = env.step(actions[id])
 
                     episode_rewards[id] += r
-                    s2 = pipeline_fn(s2)
 
                     if "Breakout" in FLAGS.env and info['ale.lives'] < lives_info[id]:
                         r = -1.0
@@ -354,8 +366,7 @@ def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipel
                     rewards_memory[id].append(r)
                     values_memory[id].append(values[id])
 
-                    observations[id] = s2 - old_observations[id]
-                    old_observations[id] = s2
+                    observations[id] = pipeline_fn(s2)
 
         future_values = agent.get_values(observations)
 
