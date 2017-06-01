@@ -1,7 +1,8 @@
-"""Summary
+"""
+Simple implemntation of
+"Efficient Parallel Methods for Deep Reinforcement Learning"
+https://arxiv.org/abs/1705.04862
 
-Attributes:
-    parser (TYPE): Description
 """
 import argparse
 import tensorflow as tf
@@ -64,11 +65,11 @@ FLAGS, _ = parser.parse_known_args()
 
 def resize_image(image, new_HW):
     """Returns a resize image
-
+    
     Args:
         image (3-D Array): RGB Image Array of shape (H, W, C)
         new_HW (tuple, optional): New Height and Width (height, width)
-
+    
     Returns:
         3-D Array: A resized image of shape (`height`, `width`, C)
     """
@@ -77,12 +78,12 @@ def resize_image(image, new_HW):
 
 def crop_ROI(image, height_range=(35, 210), width_range=(0, 160)):
     """Crops a region of interest (ROI)
-
+    
     Args:
         image (3-D Array): RGB Image of shape (H, W, C)
         height_range (tuple, optional): Height range to keep (h_begin, h_end)
         width_range (tuple, optional): Width range to keep (w_begin, w_end)
-
+    
     Returns:
         3-D array: Cropped image of shape (h_end - h_begin, w_end - w_begin, C)
     """
@@ -91,40 +92,18 @@ def crop_ROI(image, height_range=(35, 210), width_range=(0, 160)):
     return image[h_beg:h_end, w_beg:w_end, ...]
 
 
-def binarize_image(image):
-    """Binarizes image (make everything 0 or 1)
-
-    Args:
-        image (3-D Array): RGB Image of shape (H, W, C)
-
-    Returns:
-        2-D Array: Binarized image of shape (H, W)
-    """
-    R = image[..., 0]
-    G = image[..., 1]
-    B = image[..., 2]
-
-    cond = (R > 0) | (G > 0) | (B > 0)
-
-    binarized = np.zeros_like(R, dtype=np.float32)
-    binarized[cond] = 1
-
-    return binarized
-
-
 def pipeline(image, new_HW):
     """Image process pipeline
-
+    
     Args:
         image (3-D Array): 3-D array of shape (H, W, C)
         new_HW (tuple): New height and width int tuple of (height, width)
-
+    
     Returns:
         3-D Array: Binarized image of shape (height, width, 1)
     """
     image = crop_ROI(image)
     image = resize_image(image, new_HW=new_HW)
-    # image = binarize_image(image)
     image = rgb2gray(image)
 
     image = (image - np.mean(image)) / (np.std(image) + 1e-8)
@@ -133,6 +112,15 @@ def pipeline(image, new_HW):
 
 
 def discount_rewards(rewards, gamma=FLAGS.decay):
+    """Discount rewards by a `gamma`
+    
+    Args:
+        rewards (1-D Array): Reward array of shape (N,)
+        gamma (float, optional): Discount Rate
+    
+    Returns:
+        1-D Array: Discounted Reward array of shape (N,)
+    """
     discounted = np.zeros_like(rewards, dtype=np.float32)
     running_add = 0
 
@@ -149,7 +137,7 @@ def discount_multi_rewards(multi_rewards, gamma=FLAGS.decay):
     Args:
         multi_rewards (2-D Array): Reward array of shape (n_envs, n_timesteps)
         gamma (float, optional): Discount rate for a reward
-
+    
     Returns:
         discounted_multi_rewards (2-D Array): Reward array of shape (n_envs, n_timesteps)
     """
@@ -161,24 +149,21 @@ def discount_multi_rewards(multi_rewards, gamma=FLAGS.decay):
 
 
 class Agent(object):
+    
     def __init__(self, input_shape: list, output_dim: int):
-        """Summary
-
+        """Agent class
+        
         Args:
-            input_shape (TYPE): Description
-            output_dim (TYPE): Description
+            input_shape (list): Input state.shape [H, W, C]
+            output_dim (int): Number of actions
         """
         self.input_shape = input_shape
         self.output_dim = output_dim
         self.__build_network(self.input_shape, self.output_dim)
 
     def __build_network(self, input_shape: list, output_dim: int):
-        """Summary
+        """Create a basic network architecture """
 
-        Args:
-            input_shape (TYPE): Description
-            output_dim (TYPE): Description
-        """
         self.states = tf.placeholder(tf.float32, shape=[None, *input_shape], name="states")
         self.actions = tf.placeholder(tf.uint8, shape=[None], name="actions")
         action_onehots = tf.one_hot(self.actions, depth=output_dim, name="action_onehots")
@@ -241,10 +226,11 @@ class Agent(object):
         self.summary_writer = tf.summary.FileWriter("{}/main".format(FLAGS.logdir), graph=tf.get_default_graph())
 
     def get_actions(self, states):
-        """
+        """Get actions given states
+
         Args:
             states (4-D Array): States Array of shape (N, H, W, C)
-
+        
         Returns:
             actions (1-D Array): Action Array of shape (N,)
         """
@@ -258,10 +244,11 @@ class Agent(object):
         return (np.cumsum(action_probs, axis=1) > noises).argmax(axis=1)
 
     def get_values(self, states):
-        """
+        """Get values given states
+
         Args:
             states (4-D Array): States Array of shape (N, H, W, C)
-
+        
         Returns:
             values (1-D Array): Values (N,)
         """
@@ -272,6 +259,15 @@ class Agent(object):
         return sess.run(self.values, feed).reshape(-1)
 
     def get_actions_values(self, states):
+        """Get actions and values given states
+        
+        Args:
+            states (4-D Array): States Array of shape (N, H, W, C)
+        
+        Returns:
+            actions (1-D Array): Action Array of shape (N,)
+            values (1-D Array): Values (N,)
+        """
         sess = tf.get_default_session()
         feed = {
             self.states: states,
@@ -284,7 +280,7 @@ class Agent(object):
 
     def train(self, states, actions, rewards, values):
         """Update parameters by gradient descent
-
+        
         Args:
             states (5-D Array): Image arrays of shape (n_envs, n_timesteps, H, W, C)
             actions (2-D Array): Action arrays of shape (n_envs, n_timesteps)
@@ -320,6 +316,17 @@ class Agent(object):
 
 
 def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipeline_fn=pipeline):
+    """Run multiple environments and update the agent
+    
+    Args:
+        envs (Iterable[gym.Env]): A list of gym environments
+        agent (Agent): Agent class
+        t_max (int, optional): Number of steps before update (default: 5)
+        pipeline_fn (function, optional): State preprocessing function
+    
+    Returns:
+        1-D Array: Episode Reward array of shape (n_env,)
+    """
     n_envs = len(envs)
     all_dones = False
 
@@ -387,6 +394,7 @@ def run_episodes(envs: Iterable[gym.Env], agent: Agent, t_max=FLAGS.t_max, pipel
 
 
 def main():
+    """Main """
     input_shape = [80, 80, 1]
     output_dim = 4
     pipeline_fn = partial(pipeline, new_HW=input_shape[:-1])
